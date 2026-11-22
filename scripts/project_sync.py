@@ -8,8 +8,8 @@ For each open issue of each repository of the organization (archived repositorie
 
 - adds the issue to the project when the project does not have it;
 - sets the number field of the estimate (default "Estimate") from the line `Estimate: <hours>` of the issue;
-- sets the date fields (default "Start date" and "Target date") from the lines `Start: <date>` and `Target: <date>` of
-  the issue;
+- sets the date issue fields of the organization (default "Start date" and "Target date") from the lines
+  `Start: <date>` and `Target: <date>` of the issue;
 - adds the dependencies of the lines `Blocked by: <issues>` and `Blocks: <issues>` of the issue.
 
 The lines can be in a list or in bold, for example `- **Estimate**: 6h` or `**Blocked by**: Folkhold#597`. The
@@ -18,7 +18,9 @@ repository), `Repo#12` (same organization), `owner/repo#12` or the URL of the is
 values: it does not remove an item, an estimate, a date or a dependency. Remove them in the project or in the issue.
 
 The token needs the organization permission "Projects" (read and write), and the repository permissions "Issues" (read
-and write) and "Metadata" (read) on all the repositories of the organization. A fine-grained personal access token of
+and write) and "Metadata" (read) on all the repositories of the organization. With the organization permission
+"Issue Fields" (read), the script finds the date fields from their names. With no such permission, give their IDs with
+`--start-field-id` and `--target-field-id`. A fine-grained personal access token of
 the organization, or a classic token with the scopes `project` and `repo`, gives these permissions.
 """
 import argparse
@@ -31,6 +33,8 @@ import urllib.error
 import urllib.request
 
 API = "https://api.github.com"
+API_VERSION = "2022-11-28"
+FIELDS_API_VERSION = "2026-03-10"
 USER_AGENT = "Nicolas-s-minecraft-mods/organization (project workflow)"
 
 _PREFIX = r"^[ \t]*(?:[-*+][ \t]+)?(?:\*\*|__)?"
@@ -101,20 +105,20 @@ class GitHub:
     def __init__(self, token):
         self.token = token
 
-    def _send(self, method, url, body=None):
+    def _send(self, method, url, body=None, version=API_VERSION):
         data = None if body is None else json.dumps(body).encode()
         request = urllib.request.Request(url, data=data, method=method, headers={
             "Authorization": f"Bearer {self.token}",
             "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
+            "X-GitHub-Api-Version": version,
             "User-Agent": USER_AGENT,
         })
         with urllib.request.urlopen(request) as response:
             text = response.read().decode()
             return (json.loads(text) if text else None), response.headers.get("Link", "")
 
-    def rest(self, method, path, body=None):
-        return self._send(method, f"{API}{path}", body)[0]
+    def rest(self, method, path, body=None, version=API_VERSION):
+        return self._send(method, f"{API}{path}", body, version)[0]
 
     def rest_all(self, path):
         """All the pages of a list."""
@@ -150,16 +154,13 @@ class GitHub:
         fields = {node["name"]: node for node in project["fields"]["nodes"] if node}
         return {"id": project["id"], "fields": fields}
 
-    def items(self, project_id, field, start="Start date", target="Target date"):
-        """The issues of a project: {issue node ID: {"item": item ID, "estimate", "start", "target"}}.
-
-        A value is None when the item has no value in the field.
-        """
+    def items(self, project_id, field):
+        """The issues of a project: {issue node ID: {"item": item ID, "estimate": value or None}}."""
         values = {}
         cursor = None
         while True:
             data = self.graphql("""
-                query($id: ID!, $cursor: String, $field: String!, $start: String!, $target: String!) {
+                query($id: ID!, $cursor: String, $field: String!) {
                   node(id: $id) {
                     ... on ProjectV2 {
                       items(first: 100, after: $cursor) {
@@ -167,26 +168,18 @@ class GitHub:
                         nodes {
                           id
                           content { ... on Issue { id } }
-                          estimate: fieldValueByName(name: $field) {
-                            ... on ProjectV2ItemFieldNumberValue { number }
-                          }
-                          start: fieldValueByName(name: $start) { ... on ProjectV2ItemFieldDateValue { date } }
-                          target: fieldValueByName(name: $target) { ... on ProjectV2ItemFieldDateValue { date } }
+                          fieldValueByName(name: $field) { ... on ProjectV2ItemFieldNumberValue { number } }
                         }
                       }
                     }
                   }
-                }""", {"id": project_id, "cursor": cursor, "field": field, "start": start, "target": target})
+                }""", {"id": project_id, "cursor": cursor, "field": field})
             page = data["node"]["items"]
             for node in page["nodes"]:
                 content = node.get("content") or {}
                 if content.get("id"):
-                    values[content["id"]] = {
-                        "item": node["id"],
-                        "estimate": (node.get("estimate") or {}).get("number"),
-                        "start": (node.get("start") or {}).get("date"),
-                        "target": (node.get("target") or {}).get("date"),
-                    }
+                    value = node.get("fieldValueByName") or {}
+                    values[content["id"]] = {"item": node["id"], "estimate": value.get("number")}
             if not page["pageInfo"]["hasNextPage"]:
                 return values
             cursor = page["pageInfo"]["endCursor"]
@@ -216,13 +209,21 @@ class GitHub:
               ) { projectV2Item { id } }
             }""", {"project": project_id, "item": item_id, "field": field_id, "value": value})
 
-    def set_date(self, project_id, item_id, field_id, value):
-        self.graphql("""
-            mutation($project: ID!, $item: ID!, $field: ID!, $value: Date!) {
-              updateProjectV2ItemFieldValue(
-                input: {projectId: $project, itemId: $item, fieldId: $field, value: {date: $value}}
-              ) { projectV2Item { id } }
-            }""", {"project": project_id, "item": item_id, "field": field_id, "value": value})
+    def issue_fields(self, org):
+        """The date issue fields of an organization: {name: field ID}."""
+        fields = self.rest("GET", f"/orgs/{org}/issue-fields", version=FIELDS_API_VERSION)
+        return {field["name"]: field["id"] for field in fields if field.get("data_type") == "date"}
+
+    def field_values(self, owner, repo, number):
+        """The issue field values of an issue: {field ID: value}."""
+        values = self.rest("GET", f"/repos/{owner}/{repo}/issues/{number}/issue-field-values",
+                           version=FIELDS_API_VERSION)
+        return {value["issue_field_id"]: value.get("value") for value in values}
+
+    def set_field_values(self, owner, repo, number, values):
+        """Sets issue field values of an issue from {field ID: value}. The other values of the issue stay."""
+        body = {"issue_field_values": [{"field_id": field, "value": value} for field, value in values.items()]}
+        self.rest("POST", f"/repos/{owner}/{repo}/issues/{number}/issue-field-values", body, FIELDS_API_VERSION)
 
     def blocked_by(self, owner, repo, number):
         """The IDs of the issues that block an issue."""
@@ -237,12 +238,13 @@ class Sync:
     """One synchronization. `errors` counts the operations that failed: the other operations continue."""
 
     def __init__(self, api, org, number, field="Estimate", dry_run=False, out=print, start_field="Start date",
-                 target_field="Target date"):
+                 target_field="Target date", start_field_id=None, target_field_id=None):
         self.api = api
         self.org = org
         self.number = number
         self.field = field
         self.date_fields = {"start": start_field, "target": target_field}
+        self.date_field_ids = {"start": start_field_id, "target": target_field_id}
         self.dry_run = dry_run
         self.out = out
         self.errors = 0
@@ -284,18 +286,49 @@ class Sync:
         if field is None or field.get("dataType") != "NUMBER":
             self._error(f"The project has no number field \"{self.field}\": the estimates do not change.")
             field = None
-        date_fields = {}
-        for key, name in self.date_fields.items():
-            date_field = project["fields"].get(name)
-            if date_field is None or date_field.get("dataType") != "DATE":
-                self._error(f"The project has no date field \"{name}\": these dates do not change.")
-            else:
-                date_fields[key] = date_field
-        items = self.api.items(project["id"], self.field, self.date_fields["start"], self.date_fields["target"])
+        date_fields = self._date_fields()
+        items = self.api.items(project["id"], self.field)
         for repo in self.api.repositories(self.org):
             for issue in self.api.open_issues(self.org, repo):
                 self._sync_issue(project["id"], field, date_fields, items, repo, issue)
         return self.errors
+
+    def _date_fields(self):
+        """The IDs of the date issue fields: {"start": ID, "target": ID}, with no key for a field that is not found."""
+        found = {key: field for key, field in self.date_field_ids.items() if field is not None}
+        if len(found) == len(self.date_fields):
+            return found
+        try:
+            by_name = self.api.issue_fields(self.org)
+        except (urllib.error.HTTPError, RuntimeError) as error:
+            by_name = {}
+            self._error(f"The script cannot read the issue fields of {self.org}: {error}")
+        for key, name in self.date_fields.items():
+            if key in found:
+                continue
+            if name in by_name:
+                found[key] = by_name[name]
+            else:
+                self._error(f"The organization has no date issue field \"{name}\": these dates do not change.")
+        return found
+
+    def _sync_dates(self, date_fields, ref, name, body):
+        wanted = {date_fields[key]: (key, value) for key, value in dates(body).items()
+                  if value is not None and key in date_fields}
+        if not wanted:
+            return
+        try:
+            current = self.api.field_values(*ref)
+            changed = {field: value for field, (_, value) in wanted.items() if current.get(field) != value}
+            if not changed:
+                return
+            if not self.dry_run:
+                self.api.set_field_values(*ref, changed)
+            for field, (key, value) in wanted.items():
+                if field in changed:
+                    self.out(f"{key.capitalize()}: {name} {value}.")
+        except (urllib.error.HTTPError, RuntimeError) as error:
+            self._error(f"No dates for {name}: {error}")
 
     def _sync_issue(self, project_id, field, date_fields, items, repo, issue):
         ref = (self.org, repo, issue["number"])
@@ -304,7 +337,7 @@ class Sync:
         if item is None:
             try:
                 item_id = "dry-run" if self.dry_run else self.api.add_item(project_id, issue["node_id"])
-                item = {"item": item_id, "estimate": None, "start": None, "target": None}
+                item = {"item": item_id, "estimate": None}
                 items[issue["node_id"]] = item
                 self.out(f"Added: {name} {issue['title']}")
             except (urllib.error.HTTPError, RuntimeError) as error:
@@ -319,17 +352,7 @@ class Sync:
                 self.out(f"Estimate: {name} {hours:g} h.")
             except (urllib.error.HTTPError, RuntimeError) as error:
                 self._error(f"No estimate for {name}: {error}")
-        for key, value in dates(issue.get("body")).items():
-            date_field = date_fields.get(key)
-            if date_field is None or item is None or value is None or item.get(key) == value:
-                continue
-            try:
-                if not self.dry_run:
-                    self.api.set_date(project_id, item["item"], date_field["id"], value)
-                item[key] = value
-                self.out(f"{key.capitalize()}: {name} {value}.")
-            except (urllib.error.HTTPError, RuntimeError) as error:
-                self._error(f"No {key} date for {name}: {error}")
+        self._sync_dates(date_fields, ref, name, issue.get("body"))
         blocked_by, blocks = dependencies(issue.get("body"), self.org, repo)
         for other in blocked_by:
             self._link(ref, other)
@@ -342,8 +365,10 @@ def main(argv=None):
     parser.add_argument("--org", required=True, help="the organization of the project and of the repositories")
     parser.add_argument("--project", type=int, required=True, help="the number of the project")
     parser.add_argument("--field", default="Estimate", help="the number field of the estimate, in hours")
-    parser.add_argument("--start-field", default="Start date", help="the date field of the start of the work")
-    parser.add_argument("--target-field", default="Target date", help="the date field of the end of the work")
+    parser.add_argument("--start-field", default="Start date", help="the date issue field of the start of the work")
+    parser.add_argument("--target-field", default="Target date", help="the date issue field of the end of the work")
+    parser.add_argument("--start-field-id", type=int, help="the ID of the start field, when the token cannot read it")
+    parser.add_argument("--target-field-id", type=int, help="the ID of the target field, when the token cannot read it")
     parser.add_argument("--dry-run", action="store_true", help="show the changes, and change nothing")
     args = parser.parse_args(argv)
     token = os.environ.get("PROJECT_TOKEN")
@@ -352,7 +377,8 @@ def main(argv=None):
               file=sys.stderr)
         return 1
     sync = Sync(GitHub(token), args.org, args.project, args.field, args.dry_run, start_field=args.start_field,
-                target_field=args.target_field)
+                target_field=args.target_field, start_field_id=args.start_field_id,
+                target_field_id=args.target_field_id)
     try:
         errors = sync.run()
     except urllib.error.HTTPError as error:

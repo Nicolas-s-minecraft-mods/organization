@@ -2,7 +2,7 @@ name: Project
 
 # Synchronizes the open issues of all the repositories of the organization with the project "Mods project" (see
 # scripts/project_sync.py): it adds the issues to the project, sets the field "Estimate" from the line "Estimate:" of
-# each issue, sets the fields "Start date" and "Target date" from the lines "Start:" and "Target:", and adds the
+# each issue, sets the issue fields "Start date" and "Target date" from the lines "Start:" and "Target:", and adds the
 # dependencies of the lines "Blocked by:" and "Blocks:".
 # The workflow runs each hour, after a change of the script on main, and with "Run workflow". A fork skips the job.
 # The secret PROJECT_TOKEN (secret of the organization) is a token with the permissions of scripts/project_sync.py.
@@ -46,4 +46,7 @@ jobs:
         env:
           PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
           DRY_RUN: ${{ inputs.dry-run && '--dry-run' || '' }}
-        run: python3 scripts/project_sync.py --org "$GITHUB_REPOSITORY_OWNER" --project 2 $DRY_RUN
+        # The IDs are the IDs of the issue fields "Start date" and "Target date" of the organization.
+        run: >
+          python3 scripts/project_sync.py --org "$GITHUB_REPOSITORY_OWNER" --project 2
+          --start-field-id 50253032 --target-field-id 50253033 $DRY_RUN
