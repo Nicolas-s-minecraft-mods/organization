@@ -6,27 +6,29 @@ import urllib.error
 import project_sync
 
 ORG = "Org"
-DATE_FIELDS = {"Start date": {"id": "F2", "dataType": "DATE"}, "Target date": {"id": "F3", "dataType": "DATE"}}
+DATE_FIELDS = {"Start date": 2, "Target date": 3}
 
 
 class FakeGitHub:
     """A project and repositories in memory."""
 
-    def __init__(self, repos, items=None, fields=None, missing=()):
+    def __init__(self, repos, items=None, fields=None, missing=(), issue_fields=DATE_FIELDS, values=None):
         self.repos = repos
         self.items_ = dict(items or {})
-        self.fields = fields if fields is not None else {"Estimate": {"id": "F1", "dataType": "NUMBER"}, **DATE_FIELDS}
+        self.fields = fields if fields is not None else {"Estimate": {"id": "F1", "dataType": "NUMBER"}}
         self.missing = set(missing)
         self.added = []
         self.numbers = []
         self.dates = []
+        self.issue_fields_ = issue_fields
+        self.values = dict(values or {})
         self.links = []
         self.blockers = {}
 
     def project(self, org, number):
         return {"id": "P1", "fields": self.fields}
 
-    def items(self, project_id, field, start="Start date", target="Target date"):
+    def items(self, project_id, field):
         return {key: dict(value) for key, value in self.items_.items()}
 
     def repositories(self, org):
@@ -47,8 +49,16 @@ class FakeGitHub:
     def set_number(self, project_id, item_id, field_id, value):
         self.numbers.append((item_id, field_id, value))
 
-    def set_date(self, project_id, item_id, field_id, value):
-        self.dates.append((item_id, field_id, value))
+    def issue_fields(self, org):
+        if self.issue_fields_ is None:
+            raise urllib.error.HTTPError("url", 403, "Forbidden", {}, io.BytesIO(b""))
+        return dict(self.issue_fields_)
+
+    def field_values(self, owner, repo, number):
+        return dict(self.values.get((repo, number), {}))
+
+    def set_field_values(self, owner, repo, number, values):
+        self.dates.append((repo, number, dict(values)))
 
     def blocked_by(self, owner, repo, number):
         return set(self.blockers.get((repo, number), set()))
@@ -168,7 +178,7 @@ class SyncTest(unittest.TestCase):
         self.assertIn("Dependency: Org/Cartofold#1 blocked by Org/Cartofold#2.", lines)
 
     def test_no_estimate_field_is_a_warning(self):
-        api = FakeGitHub({"Cartofold": [issue(1, "Estimate: 4")]}, fields=dict(DATE_FIELDS))
+        api = FakeGitHub({"Cartofold": [issue(1, "Estimate: 4")]}, fields={})
 
         errors, _ = run(api)
 
@@ -177,15 +187,15 @@ class SyncTest(unittest.TestCase):
         self.assertEqual([], api.numbers)
 
     def test_sets_the_dates_that_changed(self):
-        issues = [issue(1, "Start: 2026-11-23\nTarget: 2026-11-25"), issue(2, "Start: 2026-11-26")]
-        api = FakeGitHub({"Folkhold": issues},
-                         items={"N1": {"item": "I1", "estimate": None, "start": "2026-11-23", "target": "2026-11-24"}})
+        issues = [issue(1, "Start: 2026-11-23\nTarget: 2026-11-25"), issue(2, "Start: 2026-11-26"), issue(3, "Text")]
+        api = FakeGitHub({"Folkhold": issues}, values={("Folkhold", 1): {2: "2026-11-23", 3: "2026-11-24"}})
 
         errors, lines = run(api)
 
         self.assertEqual(0, errors)
-        self.assertEqual([("I1", "F3", "2026-11-25"), ("I-N2", "F2", "2026-11-26")], api.dates)
+        self.assertEqual([("Folkhold", 1, {3: "2026-11-25"}), ("Folkhold", 2, {2: "2026-11-26"})], api.dates)
         self.assertIn("Target: Folkhold#1 2026-11-25.", lines)
+        self.assertNotIn("Start: Folkhold#1 2026-11-23.", lines)
 
     def test_dry_run_sets_no_date(self):
         api = FakeGitHub({"Folkhold": [issue(1, "Start: 2026-11-23")]})
@@ -198,12 +208,28 @@ class SyncTest(unittest.TestCase):
 
     def test_no_date_field_is_a_warning_and_the_estimates_continue(self):
         api = FakeGitHub({"Folkhold": [issue(1, "Estimate: 4\nStart: 2026-11-23\nTarget: 2026-11-25")]},
-                         fields={"Estimate": {"id": "F1", "dataType": "NUMBER"},
-                                 "Start date": {"id": "F2", "dataType": "TEXT"}})
+                         issue_fields={"Start date": 2})
 
         errors, _ = run(api)
 
-        self.assertEqual(2, errors)
+        self.assertEqual(1, errors)
+        self.assertEqual([("I-N1", "F1", 4.0)], api.numbers)
+        self.assertEqual([("Folkhold", 1, {2: "2026-11-23"})], api.dates)
+
+    def test_field_ids_need_no_read_of_the_issue_fields(self):
+        api = FakeGitHub({"Folkhold": [issue(1, "Start: 2026-11-23\nTarget: 2026-11-25")]}, issue_fields=None)
+        lines = []
+        sync = project_sync.Sync(api, ORG, 2, out=lines.append, start_field_id=7, target_field_id=8)
+
+        self.assertEqual(0, sync.run())
+        self.assertEqual([("Folkhold", 1, {7: "2026-11-23", 8: "2026-11-25"})], api.dates)
+
+    def test_no_access_to_the_issue_fields_is_a_warning(self):
+        api = FakeGitHub({"Folkhold": [issue(1, "Estimate: 4\nStart: 2026-11-23")]}, issue_fields=None)
+
+        errors, lines = run(api)
+
+        self.assertEqual(3, errors)
         self.assertEqual([("I-N1", "F1", 4.0)], api.numbers)
         self.assertEqual([], api.dates)
 

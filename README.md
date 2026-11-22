@@ -7,8 +7,8 @@ Shared tools of the organization [Nicolas-s-minecraft-mods](https://github.com/N
 The open issues of all the repositories of the organization are in the project [Mods project](https://github.com/orgs/Nicolas-s-minecraft-mods/projects/2). The workflow **Project** runs each hour and with "Run workflow". It adds the open issues to the project and reads these lines in the description of each issue:
 
 - `Estimate: 6h`: the work that is necessary, in hours. The workflow sets the field **Estimate** of the project.
-- `Start: 2026-11-23`: the day the work starts. The workflow sets the field **Start date**.
-- `Target: 2026-11-25`: the day the work ends. The workflow sets the field **Target date**.
+- `Start: 2026-11-23`: the day the work starts. The workflow sets the issue field **Start date** of the organization.
+- `Target: 2026-11-25`: the day the work ends. The workflow sets the issue field **Target date** of the organization.
 - `Blocked by: #12, Folkhold#597`: the issues that must close before this issue can start.
 - `Blocks: Folkhold#597`: the issues that wait for this issue.
 
