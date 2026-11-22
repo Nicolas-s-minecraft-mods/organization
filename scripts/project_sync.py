@@ -14,8 +14,8 @@ For each open issue of each repository of the organization (archived repositorie
 
 The lines can be in a list or in bold, for example `- **Estimate**: 6h` or `**Blocked by**: Folkhold#597`. The
 estimate is a number of hours, with or without `h`. A date has the format `2026-11-23`. An issue is `#12` (same
-repository), `Repo#12` (same organization), `owner/repo#12` or the URL of the issue. The script only adds: it does not remove an item, an estimate,
-a date or a dependency. Remove them in the project or in the issue.
+repository), `Repo#12` (same organization), `owner/repo#12` or the URL of the issue. The script only adds or changes
+values: it does not remove an item, an estimate, a date or a dependency. Remove them in the project or in the issue.
 
 The token needs the organization permission "Projects" (read and write), and the repository permissions "Issues" (read
 and write) and "Metadata" (read) on all the repositories of the organization. A fine-grained personal access token of
